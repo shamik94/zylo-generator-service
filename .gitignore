@@ -1,0 +1,101 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+*.venv
+
+# Dependency directories
+node_modules/
+*/node_modules/
+pip-wheel-metadata/
+*.egg-info/
+dist/
+build/
+
+# Logs and runtime files
+*.log
+*.out
+*.pid
+*.db
+*.sqlite3
+*.sqlite
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Docker-related
+.dockerignore
+docker-compose.override.yml
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# MacOS system files
+.DS_Store
+
+# Coverage reports
+.coverage
+htmlcov/
+*.cover
+*.coverage.*
+*.cache
+nosetests.xml
+coverage.xml
+
+# Mypy and Pyright
+.mypy_cache/
+.pyright/
+
+# Linting and formatting
+.pylint.d/
+.flake8
+.black
+.isort.cfg
+
+# pytest
+.pytest_cache/
+
+# CI/CD and Deployment
+__pypackages__/
+*.pem
+*.crt
+*.key
+
+# Frontend (if applicable)
+frontend/node_modules/
+frontend/build/
+frontend/.env
+
+# Other ignore files
+*.bak
+*.swp
+*.swo
+
+# -----------------------
+# Next.js-specific ignores
+# -----------------------
+
+# Next.js build output
+.next/
+out/
+
+# Vercel deployment folder (if you use Vercel)
+.vercel/
+
+# Local environment files for Next.js
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local

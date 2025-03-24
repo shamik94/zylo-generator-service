@@ -1,0 +1,2 @@
+* * * * * /usr/local/bin/python /app/src/cron/cron.py >> /var/log/cron.log 2>&1
+# Leave an empty line at the end of the file
