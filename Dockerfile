@@ -11,11 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of your application
 COPY . .
 
-# Create a script to run the email generation
-RUN echo '#!/bin/bash\n\
-    python -m src.cron.cron' > /app/run.sh
-
-RUN chmod +x /app/run.sh
-
-# Run the script
-CMD ["/app/run.sh"]
+# Default command (can be overridden by Heroku)
+CMD ["python", "-m", "src.cron.cron"]
