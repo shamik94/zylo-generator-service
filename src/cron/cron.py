@@ -12,6 +12,14 @@ from src.agents.cold_email_agent.email_crew import EmailCrew
 from src.agents.cold_email_agent.run_email_agent import email_parser
 from src.brightdata.linkedin_data_fetcher import LinkedinDataFetcher
 from src.agents.cold_email_agent.inputs.prepare_linkedin_input import LinkedinProfile
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Create tables before running the job
 Base.metadata.create_all(bind=engine)
@@ -54,8 +62,10 @@ def run_email_generation():
             .all()
         )
 
+        logger.info("Starting email generation job")
+        
         if not leads:
-            print("No eligible leads found.")
+            logger.info("No eligible leads found.")
             return
 
         for lead in leads:
@@ -105,14 +115,17 @@ def run_email_generation():
                 db.commit()
                 
                 print(f"After commit - Email body: {lead.generated_email_body}")  # Debug log
-                print(f"Successfully processed lead {lead.id}: {lead.lead_name}")
+                logger.info(f"Successfully processed lead {lead.id}: {lead.lead_name}")
 
             except Exception as e:
+                logger.error(f"Error processing lead {lead.id}: {e}")
+                logger.error(traceback.format_exc())
                 lead.status = "error"
                 db.commit()
-                print(f"Error processing lead {lead.id}: {e}")
-                traceback.print_exc()
 
+    except Exception as e:
+        logger.error(f"Job failed: {e}")
+        logger.error(traceback.format_exc())
     finally:
         db.close()
 
