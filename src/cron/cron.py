@@ -1,18 +1,21 @@
+import warnings
 import traceback
+import logging
 from datetime import datetime, timedelta
-import boto3
-import json
-import os
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
+
 from src.db.session import SessionLocal, engine
-from src.model.lead_email_details import LeadEmailDetails
-from src.db.base import Base
-from src.agents.cold_email_agent.email_crew import EmailCrew
-from src.agents.cold_email_agent.run_email_agent import email_parser
-from src.brightdata.linkedin_data_fetcher import LinkedinDataFetcher
-from src.agents.cold_email_agent.inputs.prepare_linkedin_input import LinkedinProfile
-import logging
+from src.model.lead_email_details import LeadEmailDetails, Base
+from src.service.email_generation_service import EmailGenerationService
+
+# Suppress specific Pydantic warning about V1/V2 mixing
+warnings.filterwarnings(
+    "ignore",
+    message="Mixing V1 models and V2 models.*",
+    category=UserWarning,
+    module="pydantic.*"
+)
 
 # Configure logging
 logging.basicConfig(
@@ -21,34 +24,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Create tables before running the job
-Base.metadata.create_all(bind=engine)
+# Default offer and CTA text
+DEFAULT_OFFER = "We provide top-tier corporate training services designed to enhance team productivity and skill development through customized workshops and ongoing support."
+DEFAULT_CTA = "Reply to this email or schedule a 15-minute call to learn how we can tailor our training to your team's specific needs."
+DEFAULT_SELLER_NAME = "John Doe"
 
-offer = "We provide top-tier corporate training services..."  # Your existing offer
-cta = "Reply to this email or schedule..."  # Your existing CTA
-
-def get_profile_from_snapshot(snapshot_id, linkedin_url):
-    """Fetch profile data from S3 and find matching URL entry"""
-    try:
-        s3 = boto3.client('s3')
-        bucket_name = os.getenv('S3_BUCKET_NAME')
-        response = s3.get_object(Bucket=bucket_name, Key=snapshot_id)
-        profiles = json.loads(response['Body'].read().decode('utf-8'))
-        
-        # Find matching profile
-        for profile in profiles:
-            if profile.get('url') == linkedin_url:
-                return profile
-        return None
-    except Exception as e:
-        print(f"Error fetching from S3: {e}")
-        return None
-
-def run_email_generation():
-    """Generates emails for leads that are not started and older than 2 minutes"""
+def run_email_generation_job():
+    """
+    Cron job to generate emails for leads that are not started and older than 2 minutes
+    """
+    # Create tables if they don't exist
+    Base.metadata.create_all(bind=engine)
+    
+    # Initialize services
+    email_service = EmailGenerationService()
+    
+    # Create database session
     db: Session = SessionLocal()
 
     try:
+        logger.info("Starting email generation job")
+        
         # Get leads with status "not_started" and updated more than 2 minutes ago
         two_mins_ago = datetime.utcnow() - timedelta(minutes=2)
         leads = (
@@ -61,121 +57,68 @@ def run_email_generation():
             )
             .all()
         )
-
-        logger.info("Starting email generation job")
         
         if not leads:
             logger.info("No eligible leads found.")
             return
 
+        logger.info(f"Found {len(leads)} leads to process")
+        
         for lead in leads:
             try:
+                # Mark as in progress to prevent duplicate processing
                 lead.status = "in_progress"
                 db.commit()
 
-                linkedin_profile = LinkedinProfile(
+                logger.info(f"Processing lead {lead.id}: {lead.lead_name}")
+                
+                # Use default values if not provided
+                offer = lead.product_desc or DEFAULT_OFFER
+                cta = lead.cta or DEFAULT_CTA
+                
+                # Generate email
+                result = email_service.generate_email(
+                    snapshot_id=lead.snapshot_id,
+                    lead_name=lead.lead_name,
                     linkedin_url=lead.linkedin_url,
-                    snapshot_id=lead.snapshot_id
-                )
-                linkedin_profile.get_person_profile()
-                linkedin_profile.get_company_profile()
-
-                crew = EmailCrew().add_all_agents().add_all_tasks().get_crew()
-                generated_email = crew.kickoff(
-                    inputs={
-                        "lead_name": lead.lead_name,
-                        "seller_name": "John Doe",
-                        "cta": lead.cta or cta,
-                        "offer": lead.product_desc or offer,
-                        "company_profile": linkedin_profile.llm_linkedin_company_input,
-                        "linkedin_profile": linkedin_profile.llm_linkedin_person_input,
-                    }
+                    offer=offer,
+                    cta=cta,
+                    seller_name=DEFAULT_SELLER_NAME
                 )
                 
-                print(f"Generated email content: {generated_email}")  # Debug log
+                if result.get("status") == "error":
+                    logger.error(f"Error generating email for lead {lead.id}: {result.get('message')}")
+                    lead.status = "error"
+                    lead.error_message = result.get("message", "Unknown error")
+                    db.commit()
+                    continue
                 
-                subject, email_content = email_parser(generated_email)
-                if not email_content:
-                    raise ValueError("Failed to parse email content")
-
-                print(f"Parsed subject: {subject}")  # Debug log
-                print(f"Parsed email content: {email_content}")  # Debug log
-
                 # Update lead with generated email
                 lead.generated_email_greeting = f"Hello {lead.lead_name}"
-                lead.generated_email_hook = subject
-                lead.generated_email_body = email_content
+                lead.generated_email_hook = result.get("subject", "")
+                lead.generated_email_body = result.get("body", "")
                 
+                # Validate email body
                 if not lead.generated_email_body:
-                    raise ValueError("Email body is empty")
-                
-                print(f"Before commit - Email body: {lead.generated_email_body}")  # Debug log
+                    raise ValueError("Generated email body is empty")
                 
                 lead.status = "done"
                 db.commit()
-                
-                print(f"After commit - Email body: {lead.generated_email_body}")  # Debug log
                 logger.info(f"Successfully processed lead {lead.id}: {lead.lead_name}")
-
+                
             except Exception as e:
-                logger.error(f"Error processing lead {lead.id}: {e}")
+                logger.error(f"Error processing lead {lead.id}: {str(e)}")
                 logger.error(traceback.format_exc())
                 lead.status = "error"
+                lead.error_message = str(e)
                 db.commit()
 
     except Exception as e:
-        logger.error(f"Job failed: {e}")
+        logger.error(f"Job failed: {str(e)}")
         logger.error(traceback.format_exc())
     finally:
         db.close()
-
-def format_linkedin_profile_from_model(person):
-    """Format LinkedIn profile data from the model for the email crew"""
-    company = ""
-    if person.positions.positions_count > 0:
-        company = person.positions.position_history[0].company_name
-        
-    return f"""
-    first_name: {person.first_name}
-    last_name: {person.last_name}
-    headline: {person.headline}
-    location: {person.location}
-    summary: {person.summary}
-    company: {company}
-    """
-
-def format_company_profile_from_model(person):
-    """Format company profile data from the model for the email crew"""
-    company = ""
-    company_description = ""
-    
-    if person.positions.positions_count > 0:
-        company = person.positions.position_history[0].company_name
-        company_description = person.positions.position_history[0].description or ""
-        
-    return f"""
-    company: {company}
-    company_description: {company_description}
-    """
-
-# Keep the original format functions for backward compatibility
-def format_linkedin_profile(profile_data):
-    """Format LinkedIn profile data for the email crew"""
-    return f"""
-    first_name: {profile_data.get('firstName', '')}
-    last_name: {profile_data.get('lastName', '')}
-    headline: {profile_data.get('headline', '')}
-    location: {profile_data.get('location', '')}
-    summary: {profile_data.get('summary', '')}
-    company: {profile_data.get('currentCompany', '')}
-    """
-
-def format_company_profile(profile_data):
-    """Format company profile data for the email crew"""
-    return f"""
-    company: {profile_data.get('currentCompany', '')}
-    company_description: {profile_data.get('companyDescription', '')}
-    """
+        logger.info("Email generation job completed")
 
 if __name__ == "__main__":
-    run_email_generation()
+    run_email_generation_job()
