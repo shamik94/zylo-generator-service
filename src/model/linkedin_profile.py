@@ -1,5 +1,9 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class CompanyInfo(BaseModel):
@@ -70,94 +74,69 @@ class LinkedInProfile(BaseModel):
     @classmethod
     def from_s3_data(cls, data: Dict[str, Any]) -> "LinkedInProfile":
         """Create a LinkedInProfile instance from the S3 data format"""
+        logger.debug(f"Creating LinkedInProfile from data: {json.dumps(data, indent=2)}")
+        
         # Ensure data is not None
         if data is None:
+            logger.error("Input data is None")
             data = {}
-            
+        
         # Extract first and last name
         full_name = data.get("name", "")
+        if not full_name and (data.get("first_name") or data.get("last_name")):
+            full_name = f"{data.get('first_name', '')} {data.get('last_name', '')}".strip()
+        
         name_parts = full_name.split(maxsplit=1) if full_name else []
-        first_name = name_parts[0] if name_parts else ""
-        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        first_name = name_parts[0] if name_parts else data.get("first_name", "")
+        last_name = name_parts[1] if len(name_parts) > 1 else data.get("last_name", "")
         
-        # Create positions list if available
-        positions = Positions(positions_count=0, position_history=[])
-        if data.get("experience"):
-            position_list = []
-            for exp in data.get("experience", []) or []:  # Handle None case
-                if exp and isinstance(exp, dict):  # Ensure exp is a valid dict
-                    position_list.append(
-                        Position(
-                            title=exp.get("title"),
-                            company_name=exp.get("company_name"),
-                            duration=exp.get("duration"),
-                            description=exp.get("description"),
-                            is_current=exp.get("is_current", False)
-                        )
-                    )
-            positions = Positions(
-                positions_count=len(position_list),
-                position_history=position_list
-            )
+        # Try different field names for job title/role
+        current_role = (
+            data.get("headline") or 
+            data.get("job_title") or 
+            data.get("title") or 
+            (data.get("experience", []) or [{}])[0].get("title", "")
+        )
         
-        # Create education list if available
-        education_list = []
-        for edu in data.get("education", []) or []:  # Handle None case
-            if edu and isinstance(edu, dict):  # Ensure edu is a valid dict
-                education_list.append(
-                    Education(
-                        title=edu.get("title"),
-                        institution=edu.get("school_name"),
-                        start_year=edu.get("start_year"),
-                        end_year=edu.get("end_year"),
-                        description=edu.get("description")
-                    )
-                )
+        # Try different field names for company
+        current_company = data.get("current_company", {}) or {}
+        if not current_company and data.get("experience"):
+            current_exp = data["experience"][0] if isinstance(data["experience"], list) and data["experience"] else {}
+            current_company = {
+                "name": current_exp.get("company_name"),
+                "description": current_exp.get("company_description")
+            }
         
-        # Create skills list if available
-        skills_list = data.get("skills", []) or []  # Handle None case
-        if isinstance(skills_list, list):
-            skills = [skill.get("name") if isinstance(skill, dict) else skill 
-                     for skill in skills_list 
-                     if skill and (isinstance(skill, dict) or isinstance(skill, str))]
-        else:
-            skills = []
-        
-        # Create languages list if available
-        languages_list = []
-        for lang in data.get("languages", []) or []:  # Handle None case
-            if lang and isinstance(lang, dict):
-                languages_list.append({
-                    "title": lang.get("title", ""),
-                    "proficiency": lang.get("subtitle", "")
-                })
-        
-        # Create profile instance with safe defaults
+        # Create profile instance with enhanced data extraction
         profile = cls(
             id=data.get("id") or data.get("linkedin_id"),
-            name=data.get("name", ""),
+            name=full_name,
             first_name=first_name,
             last_name=last_name,
-            headline=data.get("headline", ""),
-            location=data.get("location", ""),
-            about=data.get("about", ""),
-            summary=data.get("summary", ""),
-            url=data.get("url", ""),
-            avatar=data.get("avatar", ""),
+            headline=current_role,
+            location=data.get("location") or data.get("city", ""),
+            about=data.get("about") or data.get("summary") or data.get("description", ""),
+            summary=data.get("summary") or data.get("about") or data.get("description", ""),
+            url=data.get("url") or data.get("profile_url", ""),
+            avatar=data.get("avatar") or data.get("profile_picture", ""),
             current_company=CompanyInfo(
-                name=data.get("current_company", {}).get("name") if data.get("current_company") else None,
-                link=data.get("current_company", {}).get("link") if data.get("current_company") else None,
-                company_id=data.get("current_company", {}).get("company_id") if data.get("current_company") else None
-            ) if data.get("current_company") else None,
-            positions=positions,
-            education=education_list,
-            skills=skills,
-            languages=languages_list
+                name=current_company.get("name"),
+                link=current_company.get("link"),
+                company_id=current_company.get("company_id"),
+                description=current_company.get("description")
+            ) if current_company else None,
+            positions=cls._extract_positions(data),
+            education=cls._extract_education(data),
+            skills=cls._extract_skills(data),
+            languages=cls._extract_languages(data)
         )
         
         # Generate formatted input for LLMs
         profile.llm_linkedin_person_input = profile._format_person_input()
         profile.llm_linkedin_company_input = profile._format_company_input()
+        
+        logger.debug(f"Created profile with person input: {profile.llm_linkedin_person_input}")
+        logger.debug(f"Created profile with company input: {profile.llm_linkedin_company_input}")
         
         return profile
     
@@ -215,3 +194,88 @@ Company Information:
 Company Name: {company_name}
 Company Description: {company_description}
 """
+
+    @staticmethod
+    def _extract_positions(data: Dict[str, Any]) -> Positions:
+        positions_data = data.get("experience", []) or []
+        if not isinstance(positions_data, list):
+            positions_data = []
+            
+        position_list = []
+        for exp in positions_data:
+            if exp and isinstance(exp, dict):
+                position_list.append(
+                    Position(
+                        title=exp.get("title"),
+                        company_name=exp.get("company_name"),
+                        duration=exp.get("duration"),
+                        description=exp.get("description"),
+                        is_current=exp.get("is_current", False)
+                    )
+                )
+        
+        return Positions(
+            positions_count=len(position_list),
+            position_history=position_list
+        )
+
+    @staticmethod
+    def _extract_education(data: Dict[str, Any]) -> List[Education]:
+        education_data = data.get("education", []) or []
+        if not isinstance(education_data, list):
+            education_data = []
+            
+        education_list = []
+        for edu in education_data:
+            if edu and isinstance(edu, dict):
+                education_list.append(
+                    Education(
+                        title=edu.get("title") or edu.get("degree"),
+                        institution=edu.get("school_name") or edu.get("institution"),
+                        start_year=edu.get("start_year") or edu.get("start_date"),
+                        end_year=edu.get("end_year") or edu.get("end_date"),
+                        description=edu.get("description")
+                    )
+                )
+        return education_list
+
+    @staticmethod
+    def _extract_skills(data: Dict[str, Any]) -> List[str]:
+        """Extract skills from profile data"""
+        skills_data = data.get("skills", []) or []
+        if not isinstance(skills_data, list):
+            return []
+            
+        skills = []
+        for skill in skills_data:
+            if isinstance(skill, dict):
+                # Handle case where skill is an object
+                skill_name = skill.get("name") or skill.get("skill")
+                if skill_name:
+                    skills.append(skill_name)
+            elif isinstance(skill, str):
+                # Handle case where skill is just a string
+                skills.append(skill)
+                
+        logger.debug(f"Extracted skills: {skills}")
+        return skills
+
+    @staticmethod
+    def _extract_languages(data: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Extract languages from profile data"""
+        languages_data = data.get("languages", []) or []
+        if not isinstance(languages_data, list):
+            return []
+            
+        languages = []
+        for lang in languages_data:
+            if isinstance(lang, dict):
+                language = {
+                    "title": lang.get("title") or lang.get("language", ""),
+                    "proficiency": lang.get("subtitle") or lang.get("proficiency", "")
+                }
+                if language["title"]:  # Only add if we have at least a language name
+                    languages.append(language)
+                    
+        logger.debug(f"Extracted languages: {languages}")
+        return languages

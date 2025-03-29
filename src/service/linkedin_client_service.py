@@ -47,43 +47,46 @@ class LinkedInClientService:
             file_key = f'public/{snapshot_id}.json'
             logger.info(f"Attempting to access S3 key: {file_key} in bucket: {self.s3_bucket}")
             
-            # Get the object from S3
             try:
                 response = self.s3_client.get_object(Bucket=self.s3_bucket, Key=file_key)
                 content = response['Body'].read().decode('utf-8')
                 logger.info(f"Successfully read {len(content)} bytes from S3")
-            except Exception as e:
-                logger.error(f"Failed to read from S3: {str(e)}")
-                return None
-            
-            try:
+                logger.debug(f"Raw S3 content: {content}")  # Log full content for debugging
+                
                 # Parse JSON content
                 data = json.loads(content)
+                logger.debug(f"Parsed JSON data: {json.dumps(data, indent=2)}")
+                
                 if data is None:
                     logger.error("S3 file contains null data")
                     return None
                 
                 # Handle both list and single object formats
                 profiles = data if isinstance(data, list) else [data]
+                logger.info(f"Found {len(profiles)} profiles in data")
                 
                 # If URL is provided, find matching profile
                 if linkedin_url:
+                    logger.info(f"Looking for profile with URL: {linkedin_url}")
                     for profile in profiles:
                         if profile.get('url') == linkedin_url:
+                            logger.info("Found matching profile by URL")
                             return LinkedInProfile.from_s3_data(profile)
                     
-                    logger.warning(f"No profile found with URL {linkedin_url} in snapshot {snapshot_id}")
+                    logger.warning(f"No profile found with URL {linkedin_url}")
                     return None
                 
                 # If no URL provided and multiple profiles exist, use the first one
                 if profiles:
+                    logger.info("Using first profile from data")
                     return LinkedInProfile.from_s3_data(profiles[0])
                 
-                logger.warning(f"No profiles found in snapshot {snapshot_id}")
+                logger.warning("No profiles found in data")
                 return None
                 
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON from S3: {str(e)}")
+                logger.error(f"Raw content causing error: {content}")
                 return None
                 
         except Exception as e:
